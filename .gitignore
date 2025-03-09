@@ -5,3 +5,6 @@
 /impostorgame/node_modules
 /impostorserver/node_modules
 
+# envs
+/impostorgame/env
+/impostorserver/env
