@@ -1,10 +1,24 @@
 import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
+import { motion, AnimatePresence } from 'framer-motion';
+import WelcomeScreen from './components/WelcomeScreen';
+import LoginScreen from './components/LoginScreen';
+import LobbyScreen from './components/LobbyScreen';
+import GameScreen from './components/GameScreen';
+import VotingScreen from './components/VotingScreen';
+import ResultsScreen from './components/ResultsScreen';
+
 let socket;
 
 // Replace this with your own server URL
-const CONNECTION_PORT = 'https://localhost:3001';
+const CONNECTION_PORT = 'http://localhost:3001';
 
+// Animation variants
+const pageTransition = {
+  initial: { opacity: 0, y: 20 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: -20 }
+};
 
 function App() {
   const [loggedIn, setLoggedIn] = useState(false);
@@ -13,12 +27,25 @@ function App() {
   const [roomUsers, setRoomUsers] = useState([]);
   const [impostor, setImpostor] = useState('');
   const [word, setWord] = useState('');
+  const [wordCategory, setWordCategory] = useState('');
   const [message, setMessage] = useState('');
   const [creator, setCreator] = useState('');
   const [join, setJoin] = useState(false);
   const [create, setCreate] = useState(false);
   const [roundStarted, setRoundStarted] = useState(false);
   const [roundFinished, setRoundFinished] = useState(false);
+  const [turnOrder, setTurnOrder] = useState([]);
+  const [readyToVote, setReadyToVote] = useState(false);
+  const [votingPhase, setVotingPhase] = useState(false);
+  const [readyPlayers, setReadyPlayers] = useState([]);
+  const [requiredVotes, setRequiredVotes] = useState(0);
+  const [hasVoted, setHasVoted] = useState(false);
+  const [voteCount, setVoteCount] = useState(0);
+  const [totalVotesNeeded, setTotalVotesNeeded] = useState(0);
+  const [scores, setScores] = useState({});
+  const [roundResults, setRoundResults] = useState(null);
+  const [gamePhase, setGamePhase] = useState('lobby'); // 'lobby', 'word', 'voting', 'results'
+  const [activeRooms, setActiveRooms] = useState({});
 
   useEffect(() => {
     socket = io(CONNECTION_PORT);
@@ -27,47 +54,102 @@ function App() {
       console.log('roomdata', roomdata);
       setRoomUsers(roomdata['users']);
       setCreator(roomdata['creator']);
+      setScores(roomdata.scores || {});
+      setGamePhase('lobby');
     });
 
     socket.on('round_started', (roomData) => {
       setImpostor(roomData.impostor);
       setWord(roomData.word);
+      setWordCategory(roomData.category || '');
       setRoundStarted(true);
       setRoundFinished(false);
+      setTurnOrder(roomData.turnOrder);
+      setReadyToVote(false);
+      setVotingPhase(false);
+      setHasVoted(false);
+      setRoundResults(null);
+      setGamePhase('word');
     });
 
-    socket.on('round_ended', (impostor) => {
-      console.log('round_ended!')
-      setMessage(`Round ended! The impostor was: ${impostor}`);
-      setImpostor('');
+    socket.on('vote_ready_update', (data) => {
+      setReadyPlayers(data.readyPlayers);
+      setRequiredVotes(data.requiredCount);
+    });
 
+    socket.on('start_voting', () => {
+      setVotingPhase(true);
+      setGamePhase('voting');
+    });
+
+    socket.on('vote_update', (data) => {
+      setVoteCount(data.voteCount);
+      setTotalVotesNeeded(data.totalPlayers);
+    });
+
+    socket.on('round_ended', (data) => {
+      setRoundResults(data);
+      setScores(data.scores);
+      setMessage(`Round ended! The impostor was: ${data.impostor}`);
+      setImpostor('');
       setWord('');
+      setWordCategory('');
       setRoundStarted(false);
       setRoundFinished(true);
-      
+      setTurnOrder([]);
+      setVotingPhase(false);
+      setReadyToVote(false);
+      setHasVoted(false);
+      setGamePhase('results');
+    });
+
+    socket.on('active_rooms_update', (rooms) => {
+      setActiveRooms(rooms);
     });
 
     return () => {
+      if (loggedIn && room && user) {
+        socket.emit('leave_room', { room, user });
+      }
       socket.disconnect();
       socket.off('users_in_room');
       socket.off('role_assigned');
       socket.off('round_ended');
+      socket.off('vote_ready_update');
+      socket.off('start_voting');
+      socket.off('vote_update');
+      socket.off('active_rooms_update');
     };
   }, []);
 
   useEffect(() => {
     if (impostor){
       if (user === impostor){
-        setMessage('You are the impostor!');
+        setMessage(`You are the impostor! The word is in the category: ${wordCategory}`);
       }
       else{
-        setMessage(`The word is ${word}`)
+        setMessage(`The word is: ${word}`)
       }
     }    
-  }, [impostor]);
+  }, [impostor, wordCategory]);
+
+  // Add a new useEffect to handle window unload/close
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (loggedIn && room && user) {
+        socket.emit('leave_room', { room, user });
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [loggedIn, room, user]);
 
   const connectToRoom = () => {
-    if (user && room) {
+    if (user.trim() && room) {
       console.log('User', user);
       socket.emit(`${create ? 'create' : 'join'}_room`, { room, user }, (success) => {
         if (success) {
@@ -115,84 +197,95 @@ function App() {
     });
   };
 
+  const handleReadyToVote = () => {
+    socket.emit('ready_to_vote', { room, user }, (success) => {
+      if (success) {
+        setReadyToVote(true);
+      }
+    });
+  };
+
+  const handleVote = (votedFor) => {
+    socket.emit('submit_vote', { room, user, votedFor }, (success) => {
+      if (success) {
+        setHasVoted(true);
+      }
+    });
+  };
+
+  const handleJoinActiveRoom = (roomId) => {
+    setRoom(roomId);
+    setJoin(true);
+  };
+
   return (
-    <div className="App">
-      <header className="App-header">
-        <div className="content">
-          {!loggedIn ? (
-            !create && !join ? (
-              <>
-                <h1>Who's the Impostor?</h1>
-                <p>Welcome to the game! Create a room to start a new game or join an existing room.</p>
-                <div className="button-container">
-                  <button className="game-button create" onClick={() => setCreate(true)}>Create Room</button>
-                  <button className="game-button join" onClick={() => setJoin(true)}>Join Room</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div style={{ textAlign: "left", cursor: "pointer" }} onClick={() => { setCreate(false); setJoin(false); }}>
-                  &larr; Back
-                </div>
-                <h1>{create ? 'Create' : 'Join'} Room</h1>
-                <div className="button-container">
-                  <input
-                    type="text"
-                    placeholder="Name..."
-                    maxLength={20}
-                    onChange={(e) => setUser(e.target.value)}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Room..."
-                    value={room}
-                    maxLength={5}
-                    onChange={(e) => setRoom(e.target.value.replace(/\D/, ''))}
-                  />
-                  <button className="game-button" onClick={connectToRoom}>Enter Room</button>
-                </div>
-              </>
-            )
-          ) : (
-            console.log('round started', roundStarted),
-            !roundStarted && !roundFinished ? (
-              <>
-                <h1>{user}, You are in room: {room}</h1>
-                {/* <p>{message}</p> */}
-                <div>
-                  <p>Users in this room:</p>
-                  {roomUsers.map((u, index) => (
-                    <p key={index}>{u} {u === creator ? "(Creator)" : ""}</p>
-                  ))}
-                </div>
-                {user === creator && (
-                  <div>
-                    <button onClick={startRound}>Start Round</button>
-                  </div>
-                )}
-                <button onClick={exitFromRoom}>Leave Room</button>
-              </>
-            ) : (
-              roundStarted ? (
-                <>
-                  <h1>{message}</h1>
-                  {user === creator && (
-                    <div>
-                      <button onClick={endRound}>End Round</button>
-                    </div>
-                  )}
-                </>
+    <div className="min-h-screen among-us-bg">
+      <div className="content-wrapper container mx-auto px-4 py-8">
+        <div className="max-w-2xl mx-auto among-card">
+          <AnimatePresence mode="wait">
+            {!loggedIn ? (
+              !create && !join ? (
+                <WelcomeScreen
+                  onCreateRoom={() => setCreate(true)}
+                  onJoinRoom={() => setJoin(true)}
+                  activeRooms={activeRooms}
+                  onJoinActiveRoom={handleJoinActiveRoom}
+                />
               ) : (
-                <>
-                  <h1>{message}</h1>
-                  {user === creator && <button onClick={startRound}>Start Round</button>}
-                  <button onClick={exitFromRoom}>Leave Room</button>
-                </>
+                <LoginScreen
+                  isCreate={create}
+                  onBack={() => { setCreate(false); setJoin(false); }}
+                  onSubmit={connectToRoom}
+                  onNameChange={(e) => setUser(e.target.value)}
+                  onRoomChange={(e) => setRoom(e.target.value.replace(/\D/, ''))}
+                  room={room}
+                />
               )
-            )
-          )}
+            ) : (
+              gamePhase === 'lobby' ? (
+                <LobbyScreen
+                  user={user}
+                  room={room}
+                  roomUsers={roomUsers}
+                  creator={creator}
+                  scores={scores}
+                  onStartRound={startRound}
+                  onExitRoom={exitFromRoom}
+                />
+              ) : gamePhase === 'word' ? (
+                <GameScreen
+                  message={message}
+                  turnOrder={turnOrder}
+                  user={user}
+                  impostor={impostor}
+                  readyToVote={readyToVote}
+                  onReadyToVote={handleReadyToVote}
+                  readyPlayers={readyPlayers}
+                  requiredVotes={requiredVotes}
+                />
+              ) : gamePhase === 'voting' ? (
+                <VotingScreen
+                  hasVoted={hasVoted}
+                  roomUsers={roomUsers}
+                  user={user}
+                  onVote={handleVote}
+                  voteCount={voteCount}
+                  totalVotesNeeded={totalVotesNeeded}
+                />
+              ) : (
+                <ResultsScreen
+                  message={message}
+                  roundResults={roundResults}
+                  user={user}
+                  creator={creator}
+                  onStartRound={startRound}
+                  onExitRoom={exitFromRoom}
+                />
+              )
+            )}
+          </AnimatePresence>
         </div>
-      </header>
+      </div>
     </div>
   );
 }
