@@ -2,10 +2,6 @@
 
 # dependencies
 /node_modules
-/impostorgame/node_modules
-/impostorserver/node_modules
 
 # envs
 .env
-/impostorgame/.env
-/impostorserver/.env
